@@ -1,0 +1,6 @@
+﻿# .cursorrules – Holocron Sentinel V2
+# -------------------------------------------------
+# • Projeto: Orquestrador DPO (LGPD) na AWS
+# • Não Yapping – respostas curtas
+# • Sempre usar logging via CloudWatch
+# • Não modificar arquivos de exemplo em amazon‑bedrock‑agentcore‑samples
