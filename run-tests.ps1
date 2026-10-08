@@ -1,13 +1,19 @@
-# run-tests.ps1 – Executar testes unitários
-# Este script assume que o .venv já foi criado.
-$projRoot = "C:\Users\barre\AWS-reStart-Compliance-Portfolio\01 - PROJETOS\Holocron"
-Set-Location $projRoot
+# Run all tests for Holocron Sentinel V2
+Write-Host "Running Holocron Sentinel V2 Tests" -ForegroundColor Cyan
 
-# Ativa virtual env, se ainda não estiver ativo
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    & ".\.venv\Scripts\Activate.ps1"
+# Check if pytest is installed
+if (-not (Get-Command pytest -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing pytest..." -ForegroundColor Yellow
+    pip install pytest pytest-asyncio
 }
 
-Write-Host "Executando testes unitários..."
-python -m unittest discover -s tests
-Write-Host "✅ Testes concluídos"
+# Run all tests with coverage
+Write-Host "Running unit tests..." -ForegroundColor Cyan
+pytest tests/unit/ -v --cov=app --cov-report=term-missing --cov-report=html
+
+# Run integration tests
+Write-Host "Running integration tests..." -ForegroundColor Cyan
+pytest tests/integration/ -v
+
+# Generate coverage report
+Write-Host "Coverage report generated in htmlcov/index.html" -ForegroundColor Green

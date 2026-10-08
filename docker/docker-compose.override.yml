@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - .:/app
+      - /app/.venv
+      - /app/__pycache__
+    environment:
+      - DEBUG=1
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # Debug port
+
+  dashboard:
+    volumes:
+      - ./dashboard:/app/dashboard
+    environment:
+      - DEBUG=1

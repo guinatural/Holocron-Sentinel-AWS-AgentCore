@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # API Service (FastAPI + Uvicorn)
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - SESSION_KEY=${SESSION_KEY:-}
+      - ENVIRONMENT=development
+    volumes:
+      - .:/app
+      - sessions:/app/sessions
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - holocron-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL for audit results
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=holocron
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-holocron123}
+      - POSTGRES_DB=holocron
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - holocron-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U holocron -d holocron"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - holocron-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Streamlit Dashboard
+  dashboard:
+    image: streamlit/streamlit:latest
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./dashboard:/app/dashboard
+    command: streamlit run /app/dashboard/main.py
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    networks:
+      - holocron-network
+    restart: unless-stopped
+    depends_on:
+      - api
+
+networks:
+  holocron-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  sessions:

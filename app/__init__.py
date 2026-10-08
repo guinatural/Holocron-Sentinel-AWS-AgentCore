@@ -1,2 +1,2 @@
-# Holocron Sentinel V2 - Agente de Auditoria AWS
-# Multi-tenant security auditing with AI-powered analysis
+"""Holocron Sentinel package."""
+__version__ = "2.0.0"
