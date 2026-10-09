@@ -3,8 +3,8 @@ Write-Host "Running Holocron Sentinel V2 Tests" -ForegroundColor Cyan
 
 # Check if pytest is installed
 if (-not (Get-Command pytest -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing pytest..." -ForegroundColor Yellow
-    pip install pytest pytest-asyncio
+    Write-Host "Installing project dependencies..." -ForegroundColor Yellow
+    pip install -r requirements.txt
 }
 
 # Run all tests with coverage
