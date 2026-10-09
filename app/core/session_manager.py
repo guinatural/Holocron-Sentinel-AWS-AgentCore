@@ -1,17 +1,19 @@
-"""FileSessionManager - Multi-tenant session manager with LGPD compliance."""
+"""Local file storage for tenant-scoped session data."""
 
-import os
-import json
+import glob
 import hashlib
-from typing import Dict, Any, Optional
+import json
+import os
 from datetime import datetime
+from typing import Any, Dict, Optional
+
+_LOCAL_SESSION_KEY = os.urandom(32)
 
 
 class FileSessionManager:
-    """
-    Multi-tenant session manager with encryption for LGPD compliance.
+    """Store session records under tenant-scoped file names.
 
-    Each tenant has isolated encrypted session data stored by tenant_id.
+    The XOR transformation is only obfuscation, not secure encryption.
     """
 
     def __init__(self, base_path: str = "sessions"):
@@ -20,19 +22,30 @@ class FileSessionManager:
         os.makedirs(base_path, exist_ok=True)
 
     def _get_tenant_path(self, tenant_id: str) -> str:
-        """Get encrypted session path for tenant (hashed to prevent enumeration)."""
+        """Return a tenant-scoped path using a truncated tenant hash."""
         tenant_hash = hashlib.sha256(tenant_id.encode()).hexdigest()[:16]
         return os.path.join(self.base_path, tenant_hash)
 
-    def _get_encryption_key(self) -> bytes:
-        """Get encryption key from environment or generate temporary."""
+    def _get_session_path(
+        self, tenant_id: str, session_id: Optional[str] = None
+    ) -> str:
+        tenant_path = self._get_tenant_path(tenant_id)
+        if session_id is None:
+            return tenant_path
+        session_hash = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+        return f"{tenant_path}.{session_hash}"
+
+    def _get_storage_key(self) -> bytes:
+        """Get the configured key or a process-local key for local use."""
         key_str = os.environ.get("SESSION_KEY")
         if key_str:
             return key_str.encode()
-        # Temporary key for local development (in production, use AWS Secrets Manager)
-        return os.urandom(32)
+        # A process-local key keeps local API requests readable without a configured key.
+        return _LOCAL_SESSION_KEY
 
-    def get_session(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+    def get_session(
+        self, tenant_id: str, session_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Get tenant session data.
 
@@ -42,23 +55,26 @@ class FileSessionManager:
         Returns:
             Session data dict or None if session doesn't exist
         """
-        path = self._get_tenant_path(tenant_id)
+        path = self._get_session_path(tenant_id, session_id)
         if not os.path.exists(path):
             return None
 
-        key = self._get_encryption_key()
+        return self._read_session(path)
+
+    def _read_session(self, path: str) -> Optional[Dict[str, Any]]:
+        key = self._get_storage_key()
         try:
             with open(path, "rb") as f:
                 encrypted = f.read()
 
-            # Simple XOR decryption (for production, use AES-GCM)
+            # XOR is retained for compatibility; it does not provide encryption.
             if len(encrypted) < 12:
                 return None
 
             nonce = encrypted[:12]
             ciphertext = encrypted[12:]
 
-            # Simple decryption (XOR with nonce-derived key)
+            # Reverse the storage obfuscation.
             decrypted = bytes(
                 [
                     ciphertext[i] ^ (key[i % len(key)] ^ nonce[i % 12])
@@ -71,9 +87,14 @@ class FileSessionManager:
             # Log error in production
             return None
 
-    def save_session(self, tenant_id: str, session_data: Dict[str, Any]) -> bool:
+    def save_session(
+        self,
+        tenant_id: str,
+        session_data: Dict[str, Any],
+        session_id: Optional[str] = None,
+    ) -> bool:
         """
-        Save tenant session data with encryption.
+        Save tenant session data using the local storage transformation.
 
         Args:
             tenant_id: Unique identifier for the tenant
@@ -83,10 +104,11 @@ class FileSessionManager:
             True if successful, False otherwise
         """
         try:
-            path = self._get_tenant_path(tenant_id)
-            key = self._get_encryption_key()
+            path = self._get_session_path(tenant_id, session_id)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            key = self._get_storage_key()
 
-            # Simple encryption (XOR with nonce-derived key)
+            # XOR only obfuscates the serialized session data.
             data_str = json.dumps(session_data).encode()
             nonce = os.urandom(12)
 
@@ -104,6 +126,16 @@ class FileSessionManager:
         except Exception:
             # Log error in production
             return False
+
+    def list_sessions(self, tenant_id: str) -> list[Dict[str, Any]]:
+        """Load all named session records for one tenant."""
+        tenant_path = self._get_tenant_path(tenant_id)
+        records = []
+        for path in glob.glob(f"{tenant_path}.*"):
+            record = self._read_session(path)
+            if record is not None:
+                records.append(record)
+        return records
 
     def delete_session(self, tenant_id: str) -> bool:
         """

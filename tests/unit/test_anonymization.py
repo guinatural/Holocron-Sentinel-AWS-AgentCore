@@ -1,13 +1,14 @@
 """Unit tests for LGPD anonymization."""
 
-import pytest
-import sys
 import os
+import sys
+
+import pytest
 
 # Add app to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.security.anonymization import lgpd_anonymize, anonymize_list
+from app.security.anonymization import anonymize_list, lgpd_anonymize
 
 
 class TestAnonymization:
@@ -46,6 +47,12 @@ class TestAnonymization:
         assert result["tenant_id"] == "456"
         assert result["user_uuid"] == "abc-123"
         assert "[ANONYMIZED:" in result["cpf"]
+
+    def test_preserves_machine_check_names(self):
+        """Test machine-readable finding checks are not mistaken for personal names."""
+        result = lgpd_anonymize({"check_name": "bucket.encryption"})
+
+        assert result["check_name"] == "bucket.encryption"
 
     def test_anonymizes_nested_structures(self):
         """Test nested dictionary anonymization."""
