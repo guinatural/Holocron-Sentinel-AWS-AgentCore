@@ -1,165 +1,220 @@
-"""Integration tests for API endpoints."""
+"""Offline integration tests for API endpoints."""
 
-import pytest
-import sys
-import os
+import asyncio
+from types import SimpleNamespace
+from typing import ClassVar
+from unittest.mock import Mock
 
-# Add app to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import httpx
 
-from fastapi.testclient import TestClient
-
+from app.agents.audit_agent import AuditAgent
+from app.api import routes
 from app.api.main import app
 
-# Create test client
-client = TestClient(app)
+
+def request(method, path, **kwargs):
+    async def send():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.request(method, path, **kwargs)
+
+    return asyncio.run(send())
+
+
+class StubScanner:
+    def __init__(self, tenant_id, region="us-east-1"):
+        self.tenant_id = tenant_id
+        self.region = region
+
+    def scan_all_buckets(self):
+        return [
+            {
+                "check_name": "bucket.encryption",
+                "status": "fail",
+                "severity": "critical",
+                "description": "Bucket encryption is disabled",
+            }
+        ]
+
+    def save_scan_results(self):
+        return True
+
+    def get_findings_summary(self):
+        return {"critical": 1}
+
+
+class StubBedrockClient:
+    instances: ClassVar[list] = []
+
+    def __init__(self, region_name):
+        self.calls = []
+        self.instances.append(self)
+
+    def invoke_for_use_case(self, **kwargs):
+        self.calls.append(kwargs)
+        return "Relatório executivo de teste."
 
 
 class TestAPIEndpoints:
-    """Test API endpoints."""
-
     def test_health_check(self):
-        """Test health check endpoint."""
-        response = client.get("/health")
-
+        response = request("GET", "/health")
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert "Holocron Sentinel V2" in data.get("service", "")
+        assert response.json() == {
+            "status": "healthy",
+            "service": "Holocron Sentinel V2",
+        }
 
-    def test_root_endpoint(self):
-        """Test root endpoint."""
-        response = client.get("/")
+    def test_root_and_status_endpoints(self):
+        root_response = request("GET", "/")
+        status_response = request("GET", "/status")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["service"] == "Holocron Sentinel V2"
-        assert data["version"] == "2.0.0"
-        assert "/docs" in data.get("docs", "")
-
-    def test_status_endpoint(self):
-        """Test status endpoint."""
-        response = client.get("/status")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "running"
+        assert root_response.status_code == 200
+        assert root_response.json()["version"] == "2.0.0"
+        assert root_response.json()["docs"] == "/docs"
+        assert status_response.status_code == 200
+        assert status_response.json()["status"] == "running"
 
     def test_list_scanners(self):
-        """Test list scanners endpoint."""
-        response = client.get("/api/v1/scanners")
+        response = request("GET", "/api/v1/scanners")
 
         assert response.status_code == 200
-        data = response.json()
-        assert "scanners" in data
-        assert len(data["scanners"]) > 0
-
-        # Check that all expected scanners are listed
-        scanner_ids = [s["id"] for s in data["scanners"]]
-        assert "s3" in scanner_ids
-        assert "iam" in scanner_ids
-        assert "ec2" in scanner_ids
-        assert "security_group" in scanner_ids
-
-    def test_list_scanners_structure(self):
-        """Test scanners list structure."""
-        response = client.get("/api/v1/scanners")
-        data = response.json()
-
-        for scanner in data["scanners"]:
-            assert "id" in scanner
-            assert "name" in scanner
-            assert "description" in scanner
+        scanners = response.json()["scanners"]
+        assert {scanner["id"] for scanner in scanners} == {
+            "s3",
+            "iam",
+            "ec2",
+            "security_group",
+        }
+        assert all(
+            {"id", "name", "description"} <= scanner.keys() for scanner in scanners
+        )
 
 
 class TestAuditEndpoints:
-    """Test audit-related endpoints."""
+    def test_start_get_results_and_summary_across_requests(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(AuditAgent, "SCANNERS", {"s3": StubScanner})
+        monkeypatch.setattr("app.agents.audit_agent.BedrockClient", StubBedrockClient)
+        StubBedrockClient.instances.clear()
 
-    def test_start_audit_endpoint(self):
-        """Test start audit endpoint."""
-        audit_request = {"tenant_id": "test_tenant", "scanners": ["s3"]}
-
-        response = client.post("/api/v1/audit", json=audit_request)
-
-        # May fail due to AWS dependencies, but should return a response
-        assert response.status_code in [200, 500]  # 500 is OK for integration test
-
-    def test_get_audit_results_not_found(self):
-        """Test getting non-existent audit results."""
-        response = client.get(
-            "/api/v1/audit/nonexistent-job",
-            params={"tenant_id": "test_tenant"},
+        started = request(
+            "POST",
+            "/api/v1/audit",
+            json={
+                "tenant_id": "tenant-a",
+                "scanners": ["s3"],
+                "job_id": "local-job-1",
+            },
         )
 
-        # Should return 404 for non-existent job
+        assert started.status_code == 200
+        start_data = started.json()
+        assert start_data["job_id"] == "local-job-1"
+        assert start_data["tenant_id"] == "tenant-a"
+        assert start_data["status"] == "completed"
+        assert start_data["scanners"] == ["s3"]
+        assert len(StubBedrockClient.instances) == 1
+        assert (
+            StubBedrockClient.instances[0].calls[0]["use_case"] == "detailed_analysis"
+        )
+
+        results = request(
+            "GET", "/api/v1/audit/local-job-1", params={"tenant_id": "tenant-a"}
+        )
+        assert results.status_code == 200
+        result_data = results.json()
+        assert result_data["status"] == "completed"
+        assert result_data["findings_count"] == 1
+        assert result_data["findings_by_severity"] == {"critical": 1}
+        assert result_data["results"]["s3"]["findings"][0]["check_name"] == (
+            "bucket.encryption"
+        )
+        assert (
+            result_data["results"]["report"]["executive_summary"]
+            == "Relatório executivo de teste."
+        )
+
+        summary = request("GET", "/api/v1/summary/tenant-a")
+        assert summary.status_code == 200
+        assert summary.json()["total_findings"] == 1
+        assert summary.json()["critical_findings"] == 1
+        assert summary.json()["scanners_used"] == ["s3"]
+
+        other_tenant = request(
+            "GET", "/api/v1/audit/local-job-1", params={"tenant_id": "tenant-b"}
+        )
+        assert other_tenant.status_code == 404
+        assert request("GET", "/api/v1/summary/tenant-b").json()["total_findings"] == 0
+
+    def test_get_audit_results_returns_404_for_missing_job(self):
+        response = request(
+            "GET",
+            "/api/v1/audit/nonexistent-job",
+            params={"tenant_id": "missing-tenant"},
+        )
         assert response.status_code == 404
-
-    def test_start_audit_with_default_scanners(self):
-        """Test starting audit without specifying scanners."""
-        audit_request = {"tenant_id": "test_tenant"}
-
-        response = client.post("/api/v1/audit", json=audit_request)
-
-        # Should return a response
-        assert response.status_code in [200, 500]
 
 
 class TestScannerEndpoints:
-    """Test scanner-specific endpoints."""
+    def test_run_s3_scanner_returns_findings(self, monkeypatch):
+        monkeypatch.setattr(routes, "S3Scanner", StubScanner)
 
-    def test_run_s3_scanner(self):
-        """Test running S3 scanner."""
-        scan_request = {"tenant_id": "test_tenant", "scanner": "s3"}
+        response = request(
+            "POST",
+            "/api/v1/scanners/scan",
+            json={"tenant_id": "tenant-a", "scanner": "s3"},
+        )
 
-        response = client.post("/api/v1/scanners/scan", json=scan_request)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scanner"] == "s3"
+        assert data["findings_count"] == 1
+        assert data["findings"][0]["check_name"] == "bucket.encryption"
+        assert data["summary"] == {"critical": 1}
 
-        # May fail due to AWS dependencies
-        assert response.status_code in [200, 500]
-
-    def test_run_invalid_scanner(self):
-        """Test running invalid scanner."""
-        scan_request = {"tenant_id": "test_tenant", "scanner": "invalid_scanner"}
-
-        response = client.post("/api/v1/scanners/scan", json=scan_request)
+    def test_run_invalid_scanner_returns_400(self):
+        response = request(
+            "POST",
+            "/api/v1/scanners/scan",
+            json={"tenant_id": "tenant-a", "scanner": "invalid_scanner"},
+        )
 
         assert response.status_code == 400
-        data = response.json()
-        assert "detail" in data
+        assert "Invalid scanner" in response.json()["detail"]
 
-    def test_run_ec2_scanner(self):
-        """Test running EC2 scanner."""
-        scan_request = {"tenant_id": "test_tenant", "scanner": "ec2"}
+    def test_scanner_status_uses_local_stubs(self, monkeypatch):
+        monkeypatch.setattr(
+            routes,
+            "S3Scanner",
+            lambda **kwargs: SimpleNamespace(s3_client=Mock(list_buckets=Mock())),
+        )
+        monkeypatch.setattr(
+            routes,
+            "IAMScanner",
+            lambda **kwargs: SimpleNamespace(iam_client=Mock(list_users=Mock())),
+        )
+        monkeypatch.setattr(
+            routes,
+            "EC2Scanner",
+            lambda **kwargs: SimpleNamespace(
+                ec2_client=Mock(describe_instances=Mock())
+            ),
+        )
+        monkeypatch.setattr(routes, "SecurityGroupScanner", lambda **kwargs: object())
 
-        response = client.post("/api/v1/scanners/scan", json=scan_request)
-
-        # May fail due to AWS dependencies
-        assert response.status_code in [200, 500]
-
-
-class TestSummaryEndpoints:
-    """Test summary endpoints."""
-
-    def test_get_tenant_summary(self):
-        """Test getting tenant summary."""
-        response = client.get("/api/v1/summary/test_tenant")
-
-        # Should return summary (even if empty)
-        assert response.status_code in [200, 500]
-
-    def test_get_scanners_status(self):
-        """Test getting scanners status."""
-        response = client.get("/api/v1/scanners/status?tenant_id=test_tenant")
-
-        # Should return status for all scanners
-        assert response.status_code in [200, 500]
+        response = request(
+            "GET", "/api/v1/scanners/status", params={"tenant_id": "tenant-a"}
+        )
+        assert response.status_code == 200
+        assert {item["status"] for item in response.json().values()} == {"ready"}
 
 
 class TestCORS:
-    """Test CORS configuration."""
-
     def test_cors_headers(self):
-        """Test that CORS headers are present."""
-        response = client.options(
+        response = request(
+            "OPTIONS",
             "/health",
             headers={
                 "Origin": "http://testserver",
@@ -172,7 +227,3 @@ class TestCORS:
         assert "Access-Control-Allow-Origin" in response.headers
         assert "Access-Control-Allow-Methods" in response.headers
         assert "Access-Control-Allow-Headers" in response.headers
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

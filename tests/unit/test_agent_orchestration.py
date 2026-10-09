@@ -1,15 +1,15 @@
 """Unit tests for Agent orchestration."""
 
-import pytest
-import sys
 import os
-from unittest.mock import patch
+import sys
+from unittest.mock import Mock
+
+import pytest
 
 # Add app to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.agents.audit_agent import AuditAgent, AuditJob
-from datetime import datetime
 
 
 class TestAuditAgent:
@@ -23,43 +23,61 @@ class TestAuditAgent:
         assert agent.region == "us-east-1"
         assert agent.jobs == {}
 
-    def test_start_audit_default_scanners(self):
+    def test_start_audit_default_scanners(self, monkeypatch):
         """Test starting audit with default scanners."""
         agent = AuditAgent(tenant_id="test_tenant", region="us-east-1")
+        agent.session_manager.save_session = Mock(return_value=True)
+        scanner = Mock()
+        scanner.scan_all_buckets.return_value = []
+        scanner.scan_all_users.return_value = []
+        scanner.scan_all_roles.return_value = []
+        scanner.scan_all_instances.return_value = []
+        scanner.scan_all_volumes.return_value = []
+        scanner.scan_all_security_groups.return_value = []
+        scanner.save_scan_results.return_value = True
+        monkeypatch.setattr(
+            AuditAgent,
+            "SCANNERS",
+            {name: Mock(return_value=scanner) for name in AuditAgent.SCANNERS},
+        )
+        agent.bedrock_client.invoke_for_use_case = Mock(return_value="Relatório")
 
-        # Mock the scanners to avoid AWS calls
-        with patch.object(agent, "_run_audit") as mock_run:
-            mock_run.return_value = {
-                "job_id": "test123",
-                "tenant_id": "test_tenant",
-                "status": "completed",
-                "scanners": ["s3", "iam", "ec2", "security_group"],
-                "timestamp": datetime.utcnow().isoformat(),
-            }
+        result = agent.start_audit(job_id="test123")
 
-            result = agent.start_audit()
+        assert result["job_id"] == "test123"
+        assert result["tenant_id"] == "test_tenant"
+        assert result["status"] == "completed"
+        assert result["scanners"] == ["s3", "iam", "ec2", "security_group"]
+        assert result["findings_count"] == 0
+        assert result["results"]["report"]["executive_summary"] == "Relatório"
+        assert scanner.scan_all_buckets.called
+        assert scanner.scan_all_users.called
+        assert scanner.scan_all_roles.called
+        assert scanner.scan_all_instances.called
+        assert scanner.scan_all_volumes.called
+        assert scanner.scan_all_security_groups.called
+        agent.bedrock_client.invoke_for_use_case.assert_called_once()
 
-            assert "job_id" in result
-            assert result["status"] == "completed"
-
-    def test_start_audit_specific_scanners(self):
+    def test_start_audit_specific_scanners(self, monkeypatch):
         """Test starting audit with specific scanners."""
         agent = AuditAgent(tenant_id="test_tenant", region="us-east-1")
+        agent.session_manager.save_session = Mock(return_value=True)
+        scanner = Mock()
+        scanner.scan_all_buckets.return_value = [
+            {"severity": "high", "status": "fail", "check_name": "bucket.public"}
+        ]
+        scanner.save_scan_results.return_value = True
+        monkeypatch.setattr(AuditAgent, "SCANNERS", {"s3": Mock(return_value=scanner)})
+        agent.bedrock_client.invoke_for_use_case = Mock(return_value="Análise real")
 
-        # Mock the scanners to avoid AWS calls
-        with patch.object(agent, "_run_audit") as mock_run:
-            mock_run.return_value = {
-                "job_id": "test456",
-                "tenant_id": "test_tenant",
-                "status": "completed",
-                "scanners": ["s3"],
-                "timestamp": datetime.utcnow().isoformat(),
-            }
+        result = agent.start_audit(scanners=["s3"], job_id="test456")
 
-            result = agent.start_audit(scanners=["s3"])
-
-            assert "s3" in result["scanners"]
-            assert len(result["scanners"]) == 1
+        assert result["status"] == "completed"
+        assert result["scanners"] == ["s3"]
+        assert result["findings_count"] == 1
+        assert result["findings_by_severity"] == {"high": 1}
+        assert result["results"]["s3"]["findings"][0]["check_name"] == "bucket.public"
+        assert result["results"]["report"]["executive_summary"] == "Análise real"
 
     def test_available_scanners(self):
         """Test available scanners list."""
@@ -147,46 +165,52 @@ class TestAuditJobDataclass:
 class TestAgentOrchestration:
     """Test agent orchestration scenarios."""
 
-    def test_multi_scanner_execution(self):
+    def test_multi_scanner_execution(self, monkeypatch):
         """Test running multiple scanners."""
         agent = AuditAgent(tenant_id="test_tenant", region="us-east-1")
-
-        # All scanners should be available
+        agent.session_manager.save_session = Mock(return_value=True)
         assert len(agent.SCANNERS) == 4
+        scanner = Mock()
+        scanner.scan_all_buckets.return_value = []
+        scanner.scan_all_users.return_value = []
+        scanner.scan_all_roles.return_value = []
+        scanner.scan_all_instances.return_value = []
+        scanner.scan_all_volumes.return_value = []
+        scanner.scan_all_security_groups.return_value = []
+        scanner.save_scan_results.return_value = True
+        monkeypatch.setattr(
+            AuditAgent,
+            "SCANNERS",
+            {name: Mock(return_value=scanner) for name in AuditAgent.SCANNERS},
+        )
+        agent.bedrock_client.invoke_for_use_case = Mock(return_value="Relatório")
 
-        # Mock each scanner to return empty findings
-        with (
-            patch("app.agents.s3_scanner.S3Scanner") as mock_s3,
-            patch("app.agents.iam_scanner.IAMScanner") as mock_iam,
-            patch("app.agents.ec2_scanner.EC2Scanner") as mock_ec2,
-            patch("app.agents.security_group_scanner.SecurityGroupScanner") as mock_sg,
-        ):
+        result = agent.start_audit(scanners=list(AuditAgent.SCANNERS))
 
-            # Configure mocks
-            mock_s3.return_value.scan_all_buckets.return_value = []
-            mock_iam.return_value.scan_all_users.return_value = []
-            mock_iam.return_value.scan_all_roles.return_value = []
-            mock_ec2.return_value.scan_all_instances.return_value = []
-            mock_ec2.return_value.scan_all_volumes.return_value = []
-            mock_sg.return_value.scan_all_security_groups.return_value = []
+        assert result["status"] == "completed"
+        assert result["scanners"] == list(AuditAgent.SCANNERS)
+        assert all(
+            entry["summary"] == {"pass": 0, "fail": 0, "warning": 0, "error": 0}
+            for name, entry in result["results"].items()
+            if name != "report"
+        )
 
-            # Run audit with all scanners
-            result = agent.start_audit(scanners=["s3", "iam", "ec2", "security_group"])
-
-            assert result["status"] == "completed"
-            assert len(result["scanners"]) == 4
-
-    def test_single_scanner_execution(self):
+    def test_single_scanner_execution(self, monkeypatch):
         """Test running a single scanner."""
         agent = AuditAgent(tenant_id="test_tenant", region="us-east-1")
+        agent.session_manager.save_session = Mock(return_value=True)
+        scanner = Mock()
+        scanner.scan_all_buckets.return_value = []
+        scanner.save_scan_results.return_value = True
+        monkeypatch.setattr(AuditAgent, "SCANNERS", {"s3": Mock(return_value=scanner)})
+        agent.bedrock_client.invoke_for_use_case = Mock(return_value="Relatório")
 
-        with patch("app.agents.s3_scanner.S3Scanner") as mock_s3:
-            mock_s3.return_value.scan_all_buckets.return_value = []
+        result = agent.start_audit(scanners=["s3"], job_id="single-scanner")
 
-            result = agent.start_audit(scanners=["s3"])
-
-            assert result["status"] == "completed"
-            assert result["scanners"] == ["s3"]
+        assert result["status"] == "completed"
+        assert result["scanners"] == ["s3"]
+        assert result["results"]["s3"]["findings"] == []
+        scanner.scan_all_buckets.assert_called_once()
 
     def test_lgpd_compliance_in_agent(self):
         """Test LGPD compliance in agent findings."""

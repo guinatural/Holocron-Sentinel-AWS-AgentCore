@@ -1,10 +1,11 @@
 """EC2 Scanner - Checks EBS volumes in available state, SSH open to 0.0.0.0/0."""
 
-import boto3
 import logging
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import boto3
 
 from app.core.session_manager import FileSessionManager
 from app.security.anonymization import lgpd_anonymize
@@ -211,7 +212,7 @@ class EC2Scanner:
         try:
             # Get security groups for this instance
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response["Reservations"][0]["Instances"]
+            instance = response["Reservations"][0]["Instances"][0]
             security_groups = instance.get("SecurityGroups", [])
 
             for sg in security_groups:
@@ -266,7 +267,7 @@ class EC2Scanner:
         try:
             # Get security groups for this instance
             response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
-            instance = response["Reservations"][0]["Instances"]
+            instance = response["Reservations"][0]["Instances"][0]
             security_groups = instance.get("SecurityGroups", [])
 
             for sg in security_groups:

@@ -1,18 +1,18 @@
 """Audit Agent - Orchestrates scanning, coordinates tools, delivers reports."""
 
 import logging
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from app.aws.bedrock import BedrockClient
-from app.core.session_manager import FileSessionManager
+from app.agents.ec2_scanner import EC2Scanner
+from app.agents.iam_scanner import IAMScanner
 
 # Import scanners
 from app.agents.s3_scanner import S3Scanner
-from app.agents.iam_scanner import IAMScanner
-from app.agents.ec2_scanner import EC2Scanner
 from app.agents.security_group_scanner import SecurityGroupScanner
+from app.aws.bedrock import BedrockClient
+from app.core.session_manager import FileSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +158,12 @@ class AuditAgent:
             job.findings_by_severity = self._count_by_severity(all_findings)
             job.results = results
 
-            # Save job results
-            self._save_job_results(job)
-
             # Generate summary report
             report = self._generate_report(job, all_findings)
             job.results["report"] = report
+
+            if not self._save_job_results(job):
+                raise RuntimeError(f"Failed to persist audit job {job_id}")
 
             logger.info(
                 f"Audit job {job_id} completed with {len(all_findings)} findings"
@@ -237,11 +237,10 @@ Responda em português brasileiro com linguagem clara para gestores."""
 
         try:
             # Use Sonnet for detailed analysis
-            self.bedrock_client.set_model("sonnet")
-            report_text = self.bedrock_client.invoke_model(
+            report_text = self.bedrock_client.invoke_for_use_case(
                 prompt=prompt,
-                system_prompt="Você é um DPO (Data Protection Officer) especializado em segurança AWS e conformidade LGPD.",
                 use_case="detailed_analysis",
+                system_prompt="Você é um DPO (Data Protection Officer) especializado em segurança AWS e conformidade LGPD.",
             )
 
             return {
@@ -297,6 +296,7 @@ Responda em português brasileiro com linguagem clara para gestores."""
             "job_id": job.job_id,
             "tenant_id": job.tenant_id,
             "status": job.status,
+            "scanners": job.scanners,
             "start_time": job.start_time,
             "end_time": job.end_time,
             "findings_count": job.findings_count,
@@ -306,15 +306,29 @@ Responda em português brasileiro com linguagem clara para gestores."""
             "timestamp": job.timestamp,
         }
 
-        return self.session_manager.save_session(f"audit_job_{job.job_id}", job_data)
+        return self.session_manager.save_session(
+            self.tenant_id,
+            job_data,
+            session_id=f"audit_job_{job.job_id}",
+        )
 
     def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get audit job status."""
-        if job_id not in self.jobs:
-            return None
+        job = self.jobs.get(job_id)
+        if job is not None:
+            return self._get_job_output(job)
 
-        job = self.jobs[job_id]
-        return self._get_job_output(job)
+        record = self.session_manager.get_session(
+            self.tenant_id,
+            session_id=f"audit_job_{job_id}",
+        )
+        if (
+            record is None
+            or record.get("tenant_id") != self.tenant_id
+            or record.get("job_id") != job_id
+        ):
+            return None
+        return record
 
     def _get_job_output(self, job: AuditJob) -> Dict[str, Any]:
         """Get job output."""
@@ -334,16 +348,24 @@ Responda em português brasileiro com linguagem clara para gestores."""
 
     def list_jobs(self) -> List[Dict[str, Any]]:
         """List all audit jobs for this tenant."""
-        return [self._get_job_output(job) for job in self.jobs.values()]
+        jobs = {
+            record["job_id"]: record
+            for record in self.session_manager.list_sessions(self.tenant_id)
+            if record.get("tenant_id") == self.tenant_id and "job_id" in record
+        }
+        jobs.update(
+            {job_id: self._get_job_output(job) for job_id, job in self.jobs.items()}
+        )
+        return list(jobs.values())
 
     def get_findings(
         self, job_id: str, severity_filter: str = None
     ) -> List[Dict[str, Any]]:
         """Get findings from a job."""
-        if job_id not in self.jobs:
+        job = self.get_job_status(job_id)
+        if job is None:
             return []
 
-        job = self.jobs[job_id]
         all_findings = []
 
         for scanner_name, scanner_results in job.results.items():

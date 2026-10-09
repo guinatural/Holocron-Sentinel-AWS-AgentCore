@@ -1,6 +1,6 @@
 """LGPD Compliant Anonymization module for sensitive data protection."""
 
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 
 def lgpd_anonymize(
@@ -127,6 +127,8 @@ def lgpd_anonymize(
     def is_sensitive(key: str) -> bool:
         """Check if a key is considered sensitive per LGPD."""
         key_lower = key.lower()
+        if key_lower == "check_name":
+            return False
         for pattern in sensitive_patterns:
             if pattern in key_lower:
                 return True
