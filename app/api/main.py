@@ -1,4 +1,5 @@
 """FastAPI application for Holocron Sentinel API."""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,7 +11,7 @@ app = FastAPI(
     description="Multi-tenant security auditing API with LGPD compliance",
     version="2.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
 )
 
 # Configure CORS
@@ -34,20 +35,23 @@ async def root():
         "version": "2.0.0",
         "description": "Multi-tenant security auditing API with LGPD compliance",
         "docs": "/docs",
-        "redoc": "/redoc"
+        "redoc": "/redoc",
     }
 
 
 @app.get("/status")
 async def status():
     """API status endpoint."""
-    return {
-        "status": "running",
-        "service": "Holocron Sentinel V2",
-        "version": "2.0.0"
-    }
+    return {"status": "running", "service": "Holocron Sentinel V2", "version": "2.0.0"}
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for platform probes."""
+    return {"status": "healthy", "service": "Holocron Sentinel V2"}
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
